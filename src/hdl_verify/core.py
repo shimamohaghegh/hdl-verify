@@ -22,9 +22,6 @@ DEFAULT_TIMEOUT = 600
 # ---------------------------------------------------------------------------
 # Verilog module-name detection
 # ---------------------------------------------------------------------------
-# The old version hardcoded module names ("ref", "candidate"), which is why
-# Yosys reported: ERROR: Module `ref' not found!
-# We now read the actual module name out of each file.
 
 _COMMENT_BLOCK = re.compile(r"/\*.*?\*/", re.DOTALL)
 _COMMENT_LINE = re.compile(r"//[^\n]*")
@@ -35,44 +32,65 @@ def find_modules(path: str) -> list[str]:
     """Return every module name declared in a Verilog file, in order."""
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
         text = fh.read()
-    # Strip comments first so a commented-out module isn't picked up.
     text = _COMMENT_BLOCK.sub(" ", text)
     text = _COMMENT_LINE.sub(" ", text)
     return _MODULE_DECL.findall(text)
+
+
+def _rename_all_modules(src_text: str, suffix: str = "_cand") -> str:
+    """Add a suffix to every module declared in src_text and to all its
+    instantiations, so the renamed design cannot clash with same-named
+    modules in the reference (e.g. a shared 'fulladder' helper)."""
+    names = _MODULE_DECL.findall(
+        _COMMENT_LINE.sub(" ", _COMMENT_BLOCK.sub(" ", src_text))
+    )
+    out = src_text
+    for name in names:
+        out = re.sub(
+            r"\bmodule\s+" + re.escape(name) + r"\b",
+            "module " + name + suffix,
+            out,
+        )
+        out = re.sub(
+            r"\b" + re.escape(name) + r"(\s+[A-Za-z_][A-Za-z0-9_$]*\s*\()",
+            name + suffix + r"\1",
+            out,
+        )
+    return out
 
 
 def top_module(path: str) -> str:
     """
     Best guess at the top-level module of a Verilog file.
 
-    Convention in ArithBench: one module per file. If a file declares
-    several, we take the last one, which is the usual placement for a
-    top level that instantiates the helpers above it.
+    The top module is the one that no other module in the file instantiates.
+    In a single-module file, that is simply the one module. This is more
+    reliable than taking the last module, because a self-contained structural
+    design may list its helper modules after the top, or before it.
     """
     mods = find_modules(path)
     if not mods:
         raise ValueError(f"No module declaration found in {path}")
+    if len(mods) == 1:
+        return mods[0]
+
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        text = fh.read()
+    text = _COMMENT_BLOCK.sub(" ", text)
+    text = _COMMENT_LINE.sub(" ", text)
+
+    instantiated = set()
+    for name in mods:
+        pattern = re.compile(
+            r"\b" + re.escape(name) + r"\s+[A-Za-z_][A-Za-z0-9_$]*\s*\("
+        )
+        if pattern.search(text):
+            instantiated.add(name)
+
+    tops = [m for m in mods if m not in instantiated]
+    if len(tops) == 1:
+        return tops[0]
     return mods[-1]
-
-
-# ---------------------------------------------------------------------------
-# Port comparison
-# ---------------------------------------------------------------------------
-
-
-def _yosys_ports(path: str, module: str) -> list[str] | None:
-    """
-    Ask Yosys for the port names of a module. Returns None if Yosys fails.
-
-    Used to give a clear error when a candidate renames ports, which is a
-    common LLM behaviour and otherwise produces a confusing miter failure.
-    """
-    script = f"read_verilog -sv {_q(path)}\nhierarchy -top {module}\nproc\nstat\n"
-    ok, out = _run_yosys(script, timeout=60)
-    if not ok:
-        return None
-    ports = re.findall(r"^\s*(?:input|output|inout)\s+.*?(\w+)\s*$", out, re.MULTILINE)
-    return ports or None
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +125,7 @@ def _run_yosys(script: str, timeout: int = DEFAULT_TIMEOUT):
         return True, (result.stdout or "") + (result.stderr or "")
     except subprocess.TimeoutExpired:
         return False, "__TIMEOUT__"
-    except Exception as exc:  # noqa: BLE001 - surfaced to the user in the report
+    except Exception as exc:  # noqa: BLE001
         return False, f"__ERROR__ {exc}"
     finally:
         try:
@@ -125,10 +143,8 @@ def _run_formal(
     """
     Prove or disprove equivalence with Yosys + ABC.
 
-    Builds a miter circuit (a wrapper that flags any input where the two
-    designs disagree) and asks the SAT solver whether that flag can ever
-    be raised. No model found means the designs agree on every possible
-    input, which is the mathematical proof the proposal promises.
+    Builds a miter circuit and asks the SAT solver whether the two designs
+    can ever disagree. No model found means they agree on every input.
 
     Returns PASS, FAIL, TIMEOUT, or ERROR.
     """
@@ -143,17 +159,32 @@ def _run_formal(
     report.metadata["reference_module"] = ref_mod
     report.metadata["candidate_module"] = cand_mod
 
+    # Write a copy of the candidate with all modules renamed, so a shared
+    # helper name (e.g. fulladder) does not clash with the reference.
+    with open(candidate, "r", encoding="utf-8", errors="replace") as fh:
+        cand_text = _rename_all_modules(fh.read())
+    cand_fd, cand_renamed = tempfile.mkstemp(suffix=".v", prefix="hdlverify_cand_")
+    with os.fdopen(cand_fd, "w", encoding="utf-8") as fh:
+        fh.write(cand_text)
+    cand_mod_r = cand_mod + "_cand"
+
     script = f"""
 # --- reference design -------------------------------------------------
 read_verilog -sv {_q(reference)}
-prep -top {ref_mod} -flatten
+hierarchy -top {ref_mod}
+proc
+flatten
+opt_clean
 rename {ref_mod} gold
 design -stash gold
 
 # --- candidate design -------------------------------------------------
-read_verilog -sv {_q(candidate)}
-prep -top {cand_mod} -flatten
-rename {cand_mod} gate
+read_verilog -sv {_q(cand_renamed)}
+hierarchy -top {cand_mod_r}
+proc
+flatten
+opt_clean
+rename {cand_mod_r} gate
 design -stash gate
 
 # --- build the miter and prove it can never trigger -------------------
@@ -161,10 +192,18 @@ design -copy-from gold -as gold gold
 design -copy-from gate -as gate gate
 miter -equiv -flatten gold gate miter
 hierarchy -top miter
+flatten
+opt_clean
 sat -prove trigger 0 miter
 """
 
-    finished, output = _run_yosys(script, timeout=timeout)
+    try:
+        finished, output = _run_yosys(script, timeout=timeout)
+    finally:
+        try:
+            os.unlink(cand_renamed)
+        except OSError:
+            pass
 
     if not finished:
         if output == "__TIMEOUT__":
@@ -172,17 +211,13 @@ sat -prove trigger 0 miter
         report.errors.append(output)
         return "ERROR"
 
-    # Yosys prints one of these two lines when the SAT proof completes.
     if "SAT proof finished" in output and "SUCCESS" in output:
         return "PASS"
     if "SAT proof finished" in output and "FAIL" in output:
-        # Keep the counterexample: it names an input where they disagree.
         tail = "\n".join(output.strip().splitlines()[-40:])
         report.errors.append("Counterexample found:\n" + tail)
         return "FAIL"
 
-    # Neither line appeared, so Yosys stopped before proving anything.
-    # Most often a port-name or width mismatch between the two modules.
     tail = "\n".join(output.strip().splitlines()[-20:])
     report.errors.append("Formal check did not complete:\n" + tail)
     return "ERROR"
@@ -191,14 +226,7 @@ sat -prove trigger 0 miter
 # ---------------------------------------------------------------------------
 # Fuzzing (Month 2) — random-input simulation with Icarus Verilog
 # ---------------------------------------------------------------------------
-#
-# This is the combinational fuzz path: it drives both designs with the same
-# random inputs and checks the outputs match. It complements the formal
-# check — where the formal proof times out or can't run, the fuzzer still
-# gives evidence. Sequential (clocked) support can be added later without
-# changing this interface.
 
-# Matches:  input [7:0] a,   input a,   input signed [0:162] A
 _PORT_RE = re.compile(
     r"\b(input|output)\b\s*(?:wire|reg|logic)?\s*(signed)?\s*"
     r"(?:\[\s*(\d+)\s*:\s*(\d+)\s*\])?\s*"
@@ -207,19 +235,12 @@ _PORT_RE = re.compile(
 
 
 def _parse_ports(path: str, module: str):
-    """
-    Return (inputs, outputs), each a list of (name, width) for the module.
-
-    width is the number of bits. Best-effort text parse — good enough for
-    the flat arithmetic modules in ArithBench. Returns ([], []) if it can't
-    find the module, so the caller can skip fuzzing rather than crash.
-    """
+    """Return (inputs, outputs), each a list of (name, width) for the module."""
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
         text = fh.read()
     text = _COMMENT_BLOCK.sub(" ", text)
     text = _COMMENT_LINE.sub(" ", text)
 
-    # Isolate the chosen module's body (module ... endmodule).
     m = re.search(
         r"\bmodule\s+" + re.escape(module) + r"\b(.*?)\bendmodule\b",
         text,
@@ -245,18 +266,7 @@ def _run_fuzz(
     trials: int = 10_000,
     timeout: int = 300,
 ):
-    """
-    Fuzz-test two combinational designs against each other.
-
-    Builds a Verilog testbench that instantiates both modules, feeds them
-    identical random inputs for `trials` cycles, and flags any output
-    mismatch. Returns (verdict, trials_run):
-
-        PASS     — outputs matched on every trial
-        FAIL     — at least one mismatch found
-        NOT_RUN  — could not fuzz (no iverilog, clocked design, parse failure)
-        ERROR    — the simulator itself failed
-    """
+    """Fuzz-test two combinational designs against each other."""
     if not shutil.which("iverilog") or not shutil.which("vvp"):
         return "NOT_RUN", 0
 
@@ -270,40 +280,19 @@ def _run_fuzz(
     if not ref_in or not ref_out:
         return "NOT_RUN", 0
 
-    # Combinational only: if the design has a clock, skip (sequential fuzzing
-    # is future work). Detect common clock/reset port names.
     clocklike = {"clk", "clock", "rst", "reset", "enable", "en"}
     if any(name.lower() in clocklike for name, _ in ref_in):
         return "NOT_RUN", 0
 
     workdir = tempfile.mkdtemp(prefix="hdlverify_fuzz_")
     try:
-        # Copy both sources into the workdir. If the two modules share a name
-        # (common when candidate == reference, or an LLM kept the same name),
-        # rename the candidate's module so Icarus doesn't see a name clash.
         ref_src = os.path.join(workdir, "ref_design.v")
         shutil.copyfile(reference, ref_src)
         cand_src = os.path.join(workdir, "cand_design.v")
-        # Rename EVERY module in the candidate by adding a suffix, plus its
-        # instantiations, so no candidate module (including helpers like a
-        # fulladder) collides with a same-named module in the reference.
-        with open(candidate, "r", encoding="utf-8", errors="replace") as fh:
-            cand_text = fh.read()
 
-        cand_names = find_modules(candidate)
-        suffix = "_cand"
-        for name in cand_names:
-            cand_text = re.sub(
-                r"\bmodule\s+" + re.escape(name) + r"\b",
-                "module " + name + suffix,
-                cand_text,
-            )
-            cand_text = re.sub(
-                r"\b" + re.escape(name) + r"(\s+[A-Za-z_][A-Za-z0-9_$]*\s*\()",
-                name + suffix + r"\1",
-                cand_text,
-            )
-        cand_mod_use = cand_mod + suffix
+        with open(candidate, "r", encoding="utf-8", errors="replace") as fh:
+            cand_text = _rename_all_modules(fh.read())
+        cand_mod_use = cand_mod + "_cand"
 
         with open(cand_src, "w", encoding="utf-8") as fh:
             fh.write(cand_text)
@@ -314,14 +303,7 @@ def _run_fuzz(
             fh.write(tb)
 
         exe = os.path.join(workdir, "sim.vvp")
-        compile_cmd = [
-            "iverilog",
-            "-o",
-            exe,
-            tb_path,
-            ref_src,
-            cand_src,
-        ]
+        compile_cmd = ["iverilog", "-o", exe, tb_path, ref_src, cand_src]
         c = subprocess.run(compile_cmd, capture_output=True, text=True, timeout=timeout)
         if c.returncode != 0:
             return "ERROR", 0
@@ -431,29 +413,7 @@ def verify(
     prompt: str = "",
     fingerprint_path: str = "",
 ) -> VerificationReport:
-    """
-    Compare a reference HDL file against a candidate.
-
-    Parameters
-    ----------
-    reference : str
-        Path to the known-correct Verilog file.
-    candidate : str
-        Path to the candidate (e.g. AI-generated) Verilog file.
-    timeout : int
-        Seconds to allow the formal checker before returning TIMEOUT.
-    model_name : str
-        Optional name of the LLM that produced the candidate (recorded in
-        the reproducibility fingerprint).
-    prompt : str
-        Optional prompt given to the LLM (recorded in the fingerprint).
-    fingerprint_path : str
-        If given, the run's fingerprint is also written to this path as JSON.
-
-    Returns
-    -------
-    VerificationReport
-    """
+    """Compare a reference HDL file against a candidate."""
     report = VerificationReport(reference=reference, candidate=candidate)
 
     for label, path in (("reference", reference), ("candidate", candidate)):
@@ -463,7 +423,6 @@ def verify(
             report.fuzz_verdict = "NOT_RUN"
             return report
 
-    # Capture the reproducibility fingerprint for this run.
     fp = Fingerprint.capture(reference, candidate, model_name=model_name, prompt=prompt)
     report.fingerprint = fp
     report.tool_versions = fp.tool_versions
