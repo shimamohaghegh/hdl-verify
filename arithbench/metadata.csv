@@ -4,3 +4,8 @@ adders/adder_8bit.v,addition,8,standard textbook design,"a + b + carry_in = {car
 adders/adder_16bit.v,addition,16,standard textbook design,"a + b + carry_in = {carry_out, sum}",yes
 multipliers/mult_4bit.v,multiplication,4,standard textbook design,"product = a * b",yes
 subtractors/sub_8bit.v,subtraction,8,standard textbook design,"diff = a - b, borrow_out on a<b",yes
+dividers/div_4bit.v,division,4,standard textbook design,"quotient = a / b, remainder = a % b; b=0 gives quotient=1111",yes
+dividers/div_8bit.v,division,8,standard textbook design,"quotient = a / b, remainder = a % b; b=0 gives quotient=FF",yes
+comparators/comparator_8bit.v,comparison,8,standard textbook design,"eq=(a==b), gt=(a>b), lt=(a<b)",yes
+logic/bitwise_8bit.v,bitwise logic,8,standard textbook design,"and, or, xor of a and b; not of a",yes
+logic/shift_left_8bit.v,shift,8,standard textbook design,"result = a << shift_amount",yes
