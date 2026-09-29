@@ -283,24 +283,30 @@ def _run_fuzz(
         # rename the candidate's module so Icarus doesn't see a name clash.
         ref_src = os.path.join(workdir, "ref_design.v")
         shutil.copyfile(reference, ref_src)
-
         cand_src = os.path.join(workdir, "cand_design.v")
-        if cand_mod == ref_mod:
-            cand_mod_use = cand_mod + "_cand"
-            with open(candidate, "r", encoding="utf-8", errors="replace") as fh:
-                cand_text = fh.read()
-            # Rename only the module declaration; port names are untouched.
+        # Rename EVERY module in the candidate by adding a suffix, plus its
+        # instantiations, so no candidate module (including helpers like a
+        # fulladder) collides with a same-named module in the reference.
+        with open(candidate, "r", encoding="utf-8", errors="replace") as fh:
+            cand_text = fh.read()
+
+        cand_names = find_modules(candidate)
+        suffix = "_cand"
+        for name in cand_names:
             cand_text = re.sub(
-                r"\bmodule\s+" + re.escape(cand_mod) + r"\b",
-                "module " + cand_mod_use,
+                r"\bmodule\s+" + re.escape(name) + r"\b",
+                "module " + name + suffix,
                 cand_text,
-                count=1,
             )
-            with open(cand_src, "w", encoding="utf-8") as fh:
-                fh.write(cand_text)
-        else:
-            cand_mod_use = cand_mod
-            shutil.copyfile(candidate, cand_src)
+            cand_text = re.sub(
+                r"\b" + re.escape(name) + r"(\s+[A-Za-z_][A-Za-z0-9_$]*\s*\()",
+                name + suffix + r"\1",
+                cand_text,
+            )
+        cand_mod_use = cand_mod + suffix
+
+        with open(cand_src, "w", encoding="utf-8") as fh:
+            fh.write(cand_text)
 
         tb = _build_fuzz_testbench(ref_mod, cand_mod_use, ref_in, ref_out, trials)
         tb_path = os.path.join(workdir, "tb.v")
