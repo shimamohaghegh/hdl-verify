@@ -1,14 +1,16 @@
 # HDL-Verify: Project Timeline (July to December 2026)
 
 **Project:** HDL-Verify: A Validation and Reproducibility Toolkit for AI Generated Hardware Description Code
+
 **Fellow:** Shima Mohaghegh
+
 **Duration:** July 2026 to December 2026 (6 months)
 
 HDL-Verify is a free and open source Python tool. It checks whether two versions of a digital circuit are truly the same. One version is known to be correct, and the other is written by an AI model. The tool uses three methods together. It gives a formal mathematical proof, it runs a random input stress test, and it saves a full record of every run so the result can be repeated later.
 
 Together with the tool, the project also releases ArithBench-100. This is a set of 100 reference arithmetic circuits with a correct and verified answer for each one.
 
-The timeline below maps to intended deliverables for each month.
+The timeline below shows the planned deliverables for each month.
 
 ---
 
