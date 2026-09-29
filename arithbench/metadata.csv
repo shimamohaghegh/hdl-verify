@@ -9,3 +9,10 @@ dividers/div_8bit.v,division,8,standard textbook design,"quotient = a / b, remai
 comparators/comparator_8bit.v,comparison,8,standard textbook design,"eq=(a==b), gt=(a>b), lt=(a<b)",yes
 logic/bitwise_8bit.v,bitwise logic,8,standard textbook design,"and, or, xor of a and b; not of a",yes
 logic/shift_left_8bit.v,shift,8,standard textbook design,"result = a << shift_amount",yes
+adders/adder_4bit_structural.v,addition,4,structural from full adders,"a + b + carry_in = {carry_out, sum}",yes
+adders/adder_8bit_structural.v,addition,8,structural from full adders,"a + b + carry_in = {carry_out, sum}",yes
+adders/adder_16bit_structural.v,addition,16,structural from full adders,"a + b + carry_in = {carry_out, sum}",yes
+adders/adder_32bit_structural.v,addition,32,structural from full adders,"a + b + carry_in = {carry_out, sum}",yes
+adders/adder_64bit_structural.v,addition,64,structural from full adders,"a + b + carry_in = {carry_out, sum}",yes
+adders/adder_128bit_structural.v,addition,128,structural from full adders,"a + b + carry_in = {carry_out, sum}",yes
+building_blocks/fulladder.v,addition,1,"Harris & Harris textbook","s = a^b^cin, cout = (a&b)|((a^b)&cin)",yes
